@@ -162,15 +162,21 @@ function makeGalaxy({ rng, cosmo, a, z, mHalo, mStar, rVir, spin, axis, pos, vel
   else if (logMStar < 8.7) type = GALAXY_TYPE.IRREGULAR;
   else type = GALAXY_TYPE.SPIRAL;
 
-  // Disk scale length from angular momentum conservation (Mo, Mao & White):
-  // R_d = (lambda / sqrt(2)) R_vir, assuming the disk keeps the halo's specific
-  // angular momentum. This is why high-spin haloes host large, diffuse spirals.
-  let radius = (spin / Math.SQRT2) * rVir;
+  // Disk size. Pure angular momentum conservation (Mo, Mao & White) gives
+  // R_d = (lambda / sqrt(2)) R_vir, but that assumes the disk keeps all of its
+  // halo's specific angular momentum - which fails badly for cluster-scale
+  // haloes, where most of the gas never cools and no disk of that size exists.
+  // So the absolute scale is anchored to the observed size-mass relation and
+  // spin is kept as the modulation around it, which is the part it really does
+  // control: high-spin haloes host large diffuse disks, low-spin ones compact.
+  let radius;
   if (type === GALAXY_TYPE.ELLIPTICAL) {
-    // Spheroids follow the observed size-mass relation instead.
     radius = 0.0025 * Math.pow(mStar / 1e10, 0.56);
+  } else {
+    const rObserved = 0.0018 * Math.pow(Math.max(mStar, 1e6) / 5e10, 0.22);
+    radius = rObserved * Math.pow(Math.max(spin, 0.005) / 0.035, 0.6);
   }
-  radius = Math.max(0.0015, Math.min(0.12, radius));   // Mpc/h: 1.5 kpc to 120 kpc
+  radius = Math.max(0.0004, Math.min(0.06, radius));   // Mpc/h: 0.4 kpc to 60 kpc
 
   // Star formation: a declining main sequence, shut off in spheroids.
   const sfrMS = Math.pow(10, -0.5) * Math.pow(mStar / 1e10, 0.7) * Math.pow(1 + z, 2.4);

@@ -22,6 +22,7 @@ import { BodyRenderer } from './render/bodies.js';
 import { Starfield } from './render/starfield.js';
 import { StellarScene } from './render/stellarscene.js';
 import { generateSystem } from './universe/system.js';
+import { NebulaRenderer, generateNebulae } from './render/nebula.js';
 import { GALAXY_TYPE } from './universe/galaxies.js';
 import { hash3 } from './core/rng.js';
 
@@ -150,7 +151,7 @@ export async function main() {
     targetGalaxy: null,
     targetBodyIndex: 0,
     orbitLock: false,
-    yearsPerSecond: 0.08,
+    yearsPerSecond: 0.01,
     lastGalaxyA: 0,
     galaxyStats: null,
     paused: false,
@@ -166,7 +167,8 @@ export async function main() {
   const galaxyRenderer = new GalaxyRenderer(ctx);
   const bodyRenderer = new BodyRenderer(ctx);
   const starfield = new Starfield(ctx);
-  const stellar = new StellarScene(bodyRenderer, starfield);
+  const nebulaRenderer = new NebulaRenderer(ctx);
+  const stellar = new StellarScene(bodyRenderer, starfield, nebulaRenderer);
   let haloFinder = null;
   let post = null;
   const hud = new Hud();
@@ -283,6 +285,14 @@ export async function main() {
       dustOpacityPerKpc: galaxy.type === GALAXY_TYPE.ELLIPTICAL ? 0.02 : 0.22 * (0.5 + galaxy.young),
     });
 
+    // Nebulae belong to the host galaxy: a star-forming spiral is full of HII
+    // regions, an elliptical has almost no cold gas and so almost none.
+    nebulaRenderer.set(generateNebulae(seed ^ 0x51ed270b, {
+      young: galaxy.young,
+      elliptical: galaxy.type === GALAXY_TYPE.ELLIPTICAL,
+      count: quality.label === 'software' ? 4 : null,
+    }));
+
     state.scale = 'stellar';
     state.targetBodyIndex = 0;
     stellar.layout();
@@ -307,12 +317,25 @@ export async function main() {
   // Moves the camera to a comfortable viewing distance from a body.
   function frameBody(entry) {
     if (!entry) return;
+    // Lock on. A close-in planet completes an orbit in days, so a camera left
+    // parked in inertial space watches its subject fly out of frame within a
+    // second of simulated time.
+    state.orbitLock = true;
+    camera.mode = 'orbit';
     const d = Math.max(entry.radius * 4.2, 1e-6);
     camera.setPose(
       v3(entry.pos[0] + d * 0.7, entry.pos[1] + d * 0.42, entry.pos[2] + d * 0.6),
       camera.orientation);
     camera.lookAt(v3(entry.pos[0], entry.pos[1], entry.pos[2]), v3(0, 1, 0));
     camera.speed = d * 0.25;
+    camera.orbit.center.set(entry.pos);
+    camera.orbit.distance = d;
+    camera.orbit.minDistance = entry.radius * 1.02;
+    camera.orbit.maxDistance = Math.max(entry.radius * 6000, 400);
+    // Match the orbit angles to where the camera already is, so engaging the
+    // lock does not snap the view somewhere else.
+    camera.orbit.yaw = Math.atan2(camera.position[0] - entry.pos[0], camera.position[2] - entry.pos[2]);
+    camera.orbit.pitch = Math.asin(Math.max(-1, Math.min(1, (camera.position[1] - entry.pos[1]) / d)));
     hud.flash(entry.label);
   }
 
@@ -459,8 +482,10 @@ export async function main() {
   let last = performance.now();
   let stepAccumulator = 0;
   let fpsAvg = 60;
+  let frameCount = 0;
 
   function frame(now) {
+    frameCount++;
     const dtRaw = (now - last) / 1000;
     last = now;
     const dt = Math.min(dtRaw, 0.1);
@@ -492,6 +517,12 @@ export async function main() {
       const budget = Math.min(stepAccumulator | 0, 8);
       for (let i = 0; i < budget; i++) { if (!pm.step()) break; }
       stepAccumulator -= (stepAccumulator | 0);
+    }
+
+    // Keep a live lock on whatever galaxy the camera is pointed at, so the
+    // interface can say what pressing X would take you to.
+    if (state.scale === 'cosmic') {
+      state.hoverGalaxy = (frameCount % 6 === 0) ? pickGalaxy() : state.hoverGalaxy;
     }
 
     if (state.scale === 'stellar') {
@@ -545,7 +576,12 @@ export async function main() {
         if (state.showGalaxies) galaxyRenderer.render(camera, state.boxSize);
       }
     }
-    if (state.scale === 'stellar') stellar.render(camera, { time: now / 1000 });
+    if (state.scale === 'stellar') {
+      // A sunlit surface is a completely different signal from the integrated
+      // column density of a filament, and wants its own exposure.
+      post.settings.exposure = state.baseExposure * 3.2;
+      stellar.render(camera, { time: now / 1000 });
+    }
 
     post.render(now / 1000, canvas.width, canvas.height);
 
@@ -565,7 +601,7 @@ export async function main() {
   // Expose for debugging and for the automated visual tests.
   window.__opus = {
     ctx, camera, universe, web, state, placeCamera, input, galaxyRenderer, refreshGalaxies,
-    stellar, starfield, descendToSystem, ascendToCosmic, pickGalaxy, frameBody,
+    stellar, starfield, nebulaRenderer, descendToSystem, ascendToCosmic, pickGalaxy, frameBody,
     get halos() { return haloFinder ? haloFinder.halos : []; },
     haloDiag() {
       if (!haloFinder) return null;

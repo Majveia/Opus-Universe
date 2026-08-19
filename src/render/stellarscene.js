@@ -31,9 +31,10 @@ const CLOUDINESS = {
 };
 
 export class StellarScene {
-  constructor(bodyRenderer, starfield) {
+  constructor(bodyRenderer, starfield, nebulae = null) {
     this.bodies = bodyRenderer;
     this.starfield = starfield;
+    this.nebulae = nebulae;
     this.system = null;
     this.timeYears = 0;
     this.timeRate = 0.08;          // years of simulated time per second
@@ -114,7 +115,10 @@ export class StellarScene {
     if (!s) return;
     const star = s.star;
 
+    // Sky first: stars, then nebulae over them, so a dark nebula genuinely
+    // obscures the star field behind it rather than merely adding nothing.
     this.starfield.render(camera);
+    if (this.nebulae) this.nebulae.render(camera, time);
 
     const bodies = this.bodies;
     bodies.begin(camera);

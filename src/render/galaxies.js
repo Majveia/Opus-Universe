@@ -149,6 +149,7 @@ out vec4 fragColor;
 uniform float uExtent;
 uniform float uBrightness;
 uniform float uRefDistance;
+uniform float uPixelsPerRadian;
 uniform float uTime;
 ${GALAXY_COMMON}
 ${BLACKBODY_GLSL}
@@ -270,10 +271,14 @@ void main() {
     t += dt;
   }
 
-  float dist = length(vCentre) / uRefDistance;
-  // The march already integrates surface brightness, so only the inverse-square
-  // dimming of the whole system remains.
-  float scale = uBrightness * pow(10.0, g.logL - 10.0) / max(dist * dist, 1e-8);
+  // Surface brightness, not flux. A resolved object does not dim with distance:
+  // it subtends more pixels in exactly the proportion that its flux falls, and
+  // the two cancel. Requiring the integral over the galaxy's image to equal the
+  // flux the point pass would have given, sum(accum) = 2 pi (R * ppr / d)^2,
+  // fixes the constant to L / (2 pi R^2 ppr^2) - with no distance in it.
+  float rDisk = g.radius;
+  float scale = uBrightness * uRefDistance * uRefDistance * pow(10.0, g.logL - 10.0)
+              / max(6.2831853 * rDisk * rDisk * uPixelsPerRadian * uPixelsPerRadian, 1e-20);
   vec3 col = accum * scale * 0.06;
 
   fragColor = vec4(col, 1.0);
@@ -377,6 +382,7 @@ export class GalaxyRenderer {
         .set('uExtent', s.extent)
         .set('uBrightness', s.brightness)
         .set('uRefDistance', boxWorldSize)
+        .set('uPixelsPerRadian', pixelsPerRadian)
         .set('uCount', this.count);
       v.tex('uGalaxies', this.texture);
       for (const t of tiles) {

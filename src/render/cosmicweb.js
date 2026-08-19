@@ -87,7 +87,10 @@ void main() {
   // and does not fall off with distance. Where the splat has to be drawn larger
   // or smaller than its true footprint, the peak is rescaled to keep the total
   // mass it represents unchanged.
-  float footprint = (sizePx / drawn);
+  // Never above one: when the camera is inside a particle's own smoothing
+  // kernel the true footprint exceeds anything that can be rasterised, and
+  // amplifying to compensate would turn a single particle into a white screen.
+  float footprint = min(sizePx / drawn, 1.0);
   float columnDensity = pow(rho, 0.6666667) / (uKernelScale * uKernelScale);
   float fade = 1.0 - smoothstep(uFadeNear, uFadeFar, dist);
 

@@ -67,8 +67,8 @@ export class Hud {
       this._stellar(stellar, state, camera, fps);
       return;
     }
-    $('target').classList.remove('on');
     $('timeline').style.opacity = '';
+    this._cosmicTarget(state);
     const z = universe.redshift;
     const a = universe.a;
 
@@ -133,7 +133,7 @@ export class Hud {
     $('tAcale').textContent = `${stellar.timeYears.toFixed(2)} yr`;
     $('tSigma').textContent = `${state.yearsPerSecond.toFixed(3)} yr/s`;
     $('tParticles').textContent = `${s.belts.reduce((a, b) => a + b.count, 0)} bodies`;
-    $('tSplats').textContent = `${(this._sky || 0)} stars`;
+    $('tSplats').textContent = `${stellar.starfield ? stellar.starfield.count : 0} stars`;
     $('tGalaxies').textContent = `${s.rSnow.toFixed(2)} AU snow line`;
     $('tFps').textContent = fps.toFixed(0);
     const spd = camera.speed * camera.boost;
@@ -176,3 +176,24 @@ export class Hud {
 }
 
 function row(k, v) { return `<div><span class="k">${k}</span>${v}</div>`; }
+
+const TYPE_NAME = ['elliptical', 'spiral', 'irregular'];
+
+// What lies under the crosshair, and what pressing X would do about it.
+Hud.prototype._cosmicTarget = function (state) {
+  const t = $('target');
+  const g = state.hoverGalaxy;
+  if (!g) { t.classList.remove('on'); return; }
+  const rows = [
+    `<div class="h">${TYPE_NAME[g.type]} galaxy</div>`,
+    row('stellar mass', `${g.mStar.toExponential(2)} M☉`),
+    row('halo mass', `${g.mHalo.toExponential(2)} M☉`),
+    row('scale radius', `${(g.radius * 1000).toFixed(1)} kpc/h`),
+  ];
+  if (g.type === 1 && g.armCount) rows.push(row('arms', String(g.armCount)));
+  if (g.sfr > 0.02) rows.push(row('forming stars', `${g.sfr.toFixed(2)} M☉/yr`));
+  if (g.isSatellite) rows.push(row('', 'satellite'));
+  rows.push('<div class="hz">press X to enter</div>');
+  t.innerHTML = rows.join('');
+  t.classList.add('on');
+};
