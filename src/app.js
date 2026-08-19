@@ -38,10 +38,13 @@ function pickQuality(ctx) {
   const software = r.includes('swiftshader') || r.includes('llvmpipe') || r.includes('software');
   const mem = navigator.deviceMemory || 4;
   const mobile = /android|iphone|ipad|mobile/i.test(navigator.userAgent);
+  // 64^3 is the default ceiling even on capable hardware: it generates in about
+  // a second and already carries a quarter of a million particles. The 128^3
+  // universe holds two million and looks considerably better, but takes the
+  // better part of ten seconds to build, so it is offered rather than imposed.
   if (software) return { grid: 32, steps: 200, label: 'software' };
-  if (mobile || mem <= 4) return { grid: 64, steps: 320, label: 'mobile' };
-  if (ctx.limits.maxTextureSize >= 8192 && mem >= 8) return { grid: 128, steps: 420, label: 'high' };
-  return { grid: 64, steps: 380, label: 'standard' };
+  if (mobile || mem <= 4) return { grid: 32, steps: 300, label: 'mobile' };
+  return { grid: 64, steps: 400, label: 'standard' };
 }
 
 /* ------------------------------------------------------------ the world -- */
@@ -140,6 +143,7 @@ export async function main() {
     seed: overrides.seed ?? ((Math.random() * 1e9) | 0),
     gridSize: quality.grid,
     steps: quality.steps,
+    quality,
     params: { ...PRESETS.planck18 },
     presetName: 'planck18',
     stepsPerSecond: 60,
@@ -398,8 +402,18 @@ export async function main() {
     $('sS8').value = p.sigma8; $('vS8').textContent = p.sigma8.toFixed(3);
   });
   $('bRegen').addEventListener('click', () => { state.seed = (Math.random() * 1e9) | 0; rebuild('rebuilding from new initial conditions'); });
+  $('resolution').addEventListener('change', (e) => {
+    const g = parseInt(e.target.value, 10);
+    if (g === state.gridSize) return;
+    state.gridSize = g;
+    // Larger volumes deserve more steps; the timestep is logarithmic in a.
+    state.steps = g >= 128 ? 460 : g >= 64 ? 400 : 250;
+    rebuild(g >= 128 ? 'building two million particles - this takes a moment' : 'rebuilding the universe');
+  });
   $('bPause').addEventListener('click', () => { state.paused = !state.paused; $('bPause').textContent = state.paused ? 'resume' : 'pause'; });
   $('bRestart').addEventListener('click', () => { if (universe.pm) { rebuild('replaying cosmic history'); } });
+
+  $('resolution').value = String(state.gridSize);
 
   input.onWorldClick(() => { if (!panelOpen) input.requestPointerLock(); });
 
