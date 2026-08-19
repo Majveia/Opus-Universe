@@ -9,12 +9,21 @@ import { Camera } from './core/camera.js';
 import { Input } from './core/input.js';
 import { PostChain } from './render/passes.js';
 import { CosmicWebRenderer } from './render/cosmicweb.js';
+import { GalaxyRenderer } from './render/galaxies.js';
+import { HaloFinder } from './universe/halos.js';
+import { populate, packGalaxies, populationStats } from './universe/galaxies.js';
 import { Cosmology, PRESETS } from './cosmology/cosmology.js';
 import { PowerSpectrum } from './cosmology/powerspectrum.js';
 import { InitialConditions } from './cosmology/ics.js';
 import { ParticleMesh } from './sim/pm.js';
 import { v3, v3set, quat, clamp, mix, damp, DEG } from './core/math.js';
 import { Hud } from './ui/hud.js';
+import { BodyRenderer } from './render/bodies.js';
+import { Starfield } from './render/starfield.js';
+import { StellarScene } from './render/stellarscene.js';
+import { generateSystem } from './universe/system.js';
+import { GALAXY_TYPE } from './universe/galaxies.js';
+import { hash3 } from './core/rng.js';
 
 const $ = (id) => document.getElementById(id);
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
@@ -134,6 +143,16 @@ export async function main() {
     presetName: 'planck18',
     stepsPerSecond: 60,
     baseExposure: 1.4,
+    showDarkMatter: true,
+    showGalaxies: true,
+    scale: 'cosmic',
+    transition: 0,          // 0 = settled; counts down through a scale change
+    targetGalaxy: null,
+    targetBodyIndex: 0,
+    orbitLock: false,
+    yearsPerSecond: 0.08,
+    lastGalaxyA: 0,
+    galaxyStats: null,
     paused: false,
     hudVisible: true,
     building: false,
@@ -144,6 +163,11 @@ export async function main() {
   const camera = new Camera({ fov: 62, near: 0.02, speed: 6 });
   const input = new Input(canvas);
   const web = new CosmicWebRenderer(ctx);
+  const galaxyRenderer = new GalaxyRenderer(ctx);
+  const bodyRenderer = new BodyRenderer(ctx);
+  const starfield = new Starfield(ctx);
+  const stellar = new StellarScene(bodyRenderer, starfield);
+  let haloFinder = null;
   let post = null;
   const hud = new Hud();
 
@@ -183,6 +207,10 @@ export async function main() {
         steps: state.steps,
         onProgress: setLoad,
       });
+      haloFinder = new HaloFinder(universe.pm, universe.cosmo);
+      galaxyRenderer.setGalaxies(new Float32Array(0), 0);
+      state.lastGalaxyA = 0;
+      state.galaxyStats = null;
       placeCamera(2);
       await nextFrame();
       loader.classList.add('done');
@@ -190,6 +218,102 @@ export async function main() {
     } finally {
       state.building = false;
     }
+  }
+
+  // Finds haloes in the current density field and populates them with galaxies.
+  function refreshGalaxies() {
+    if (!haloFinder || !universe.pm) return;
+    const t0 = performance.now();
+    const a = universe.a;
+    // The density field the solver leaves behind is one step stale; refresh it
+    // so haloes are found in the configuration actually being displayed.
+    universe.pm.depositDensity();
+    const halos = haloFinder.find({ a, linkingLength: 0.2, minParticles: 20, maxHalos: 2500 });
+    const galaxies = populate(halos, universe.cosmo, {
+      a, boxSize: state.boxSize, seed: state.seed, maxGalaxies: 6000,
+    });
+    galaxyRenderer.setGalaxies(packGalaxies(galaxies, state.boxSize), galaxies.length, galaxies);
+    state.lastGalaxyA = a;
+    state.galaxyStats = { ...populationStats(galaxies, state.boxSize), halos: halos.length, ms: performance.now() - t0 };
+  }
+
+  // The galaxy closest to the line of sight, weighted so that a bright galaxy
+  // a little off-axis wins over a faint one dead centre.
+  function pickGalaxy() {
+    const gs = state.galaxyStats;
+    if (!gs || !gs.count) return null;
+    const list = galaxyRenderer.lastPopulation;
+    if (!list || !list.length) return null;
+    const o = camera.position, f = camera.forward;
+    let best = null, bestScore = -Infinity;
+    for (const g of list) {
+      const dx = g.pos[0] - o[0], dy = g.pos[1] - o[1], dz = g.pos[2] - o[2];
+      const dist = Math.hypot(dx, dy, dz);
+      if (dist < 1e-6) continue;
+      const cosang = (dx * f[0] + dy * f[1] + dz * f[2]) / dist;
+      if (cosang < 0.55) continue;                       // behind or far off-axis
+      const score = Math.log10(Math.max(1, g.luminosity)) + 12 * cosang - Math.log10(dist + 1);
+      if (score > bestScore) { bestScore = score; best = g; }
+    }
+    return best;
+  }
+
+  // Enters a star system inside the given galaxy. The system's seed is derived
+  // from the galaxy's own position, so the same galaxy always contains the same
+  // stars however many times it is visited.
+  function descendToSystem(galaxy) {
+    const q = galaxy.pos.map((v) => Math.round(v * 1e4));
+    const seed = (hash3(q[0], q[1], q[2]) ^ state.seed ^ (state.systemNonce | 0)) >>> 0;
+    const system = generateSystem(seed);
+    stellar.setSystem(system);
+
+    // The night sky comes from the host galaxy: its disk scale length, how
+    // bulge-dominated it is, and where in the disk this system happens to sit.
+    const diskKpc = galaxy.radius * 1000;
+    const rng = ((seed >>> 8) % 1000) / 1000;
+    starfield.build({
+      seed: seed ^ 0x9e3779b9,
+      count: quality.label === 'software' ? 12000 : 55000,
+      diskScaleKpc: Math.max(0.6, diskKpc),
+      scaleHeightKpc: Math.max(0.08, diskKpc * 0.12),
+      observerRadiusKpc: Math.max(0.4, diskKpc * (0.8 + 2.2 * rng)),
+      bulgeFraction: galaxy.type === GALAXY_TYPE.ELLIPTICAL ? 0.85 : galaxy.bulgeFraction * 0.6,
+      bulgeScaleKpc: Math.max(0.2, diskKpc * 0.3),
+      galaxyAgeGyr: 10,
+      dustOpacityPerKpc: galaxy.type === GALAXY_TYPE.ELLIPTICAL ? 0.02 : 0.22 * (0.5 + galaxy.young),
+    });
+
+    state.scale = 'stellar';
+    state.targetBodyIndex = 0;
+    stellar.layout();
+    // Arrive looking back at the star from a little beyond the outermost world.
+    const far = system.planets.length ? system.planets[system.planets.length - 1].semiMajorAU : 4;
+    const d = Math.max(2.5, far * 1.5);
+    camera.setPose(v3(d * 0.55, d * 0.42, d * 0.72), quat());
+    camera.lookAt(v3(0, 0, 0), v3(0, 1, 0));
+    camera.speed = d * 0.06;
+    camera.near = 1e-6;
+    camera.update(1 / 60, vw / vh);
+    hud.flash(system.name);
+  }
+
+  function ascendToCosmic() {
+    state.scale = 'cosmic';
+    state.orbitLock = false;
+    camera.mode = 'free';
+    placeCamera(2);
+  }
+
+  // Moves the camera to a comfortable viewing distance from a body.
+  function frameBody(entry) {
+    if (!entry) return;
+    const d = Math.max(entry.radius * 4.2, 1e-6);
+    camera.setPose(
+      v3(entry.pos[0] + d * 0.7, entry.pos[1] + d * 0.42, entry.pos[2] + d * 0.6),
+      camera.orientation);
+    camera.lookAt(v3(entry.pos[0], entry.pos[1], entry.pos[2]), v3(0, 1, 0));
+    camera.speed = d * 0.25;
+    hud.flash(entry.label);
   }
 
   function placeCamera(key) {
@@ -276,9 +400,50 @@ export async function main() {
       case 'BracketRight': state.stepsPerSecond = clamp(state.stepsPerSecond + 10, 0, 240); $('sRate').value = state.stepsPerSecond; $('vRate').textContent = state.stepsPerSecond; break;
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4':
         placeCamera(parseInt(e.code.slice(5), 10)); break;
+      case 'KeyX': {
+        if (state.scale === 'cosmic') {
+          const g = pickGalaxy();
+          if (g) { state.targetGalaxy = g; beginTransition(() => descendToSystem(g)); }
+          else hud.flash('no galaxy in view');
+        } else {
+          const b = stellar.placed[state.targetBodyIndex];
+          if (b) frameBody(b);
+        }
+        break;
+      }
+      case 'KeyZ':
+        if (state.scale === 'stellar') beginTransition(ascendToCosmic);
+        break;
+      case 'KeyT':
+        if (state.scale === 'stellar' && stellar.placed.length) {
+          state.targetBodyIndex = (state.targetBodyIndex + 1) % stellar.placed.length;
+          hud.flash(stellar.placed[state.targetBodyIndex].label);
+        }
+        break;
+      case 'KeyO':
+        if (state.scale === 'stellar') {
+          state.orbitLock = !state.orbitLock;
+          hud.flash(state.orbitLock ? 'orbit lock engaged' : 'orbit lock released');
+        }
+        break;
+      case 'KeyM': state.showDarkMatter = !state.showDarkMatter;
+        hud.flash(state.showDarkMatter ? 'dark matter visible' : 'dark matter hidden'); break;
+      case 'KeyG': state.showGalaxies = !state.showGalaxies;
+        if (state.showGalaxies) state.lastGalaxyA = 0;
+        hud.flash(state.showGalaxies ? 'galaxies visible' : 'galaxies hidden'); break;
       case 'Escape': setPanel(false); break;
     }
   });
+
+  // A short fade to black between scales. Cutting straight from a hundred
+  // megaparsecs to a few astronomical units is disorienting; a beat of darkness
+  // lets the eye let go of one scale before picking up the next.
+  let pendingTransition = null;
+  function beginTransition(fn) {
+    if (state.transition > 0) return;
+    state.transition = 1.0;
+    pendingTransition = fn;
+  }
 
   const hint = $('hint');
   const dismissHint = () => hint.classList.add('gone');
@@ -302,6 +467,19 @@ export async function main() {
     fpsAvg = mix(fpsAvg, 1 / Math.max(dtRaw, 1e-4), 0.08);
 
     resize();
+
+    // Scale change: fade out, swap, fade back in.
+    if (state.transition > 0) {
+      state.transition = Math.max(0, state.transition - dt * 1.9);
+      // transition counts 1 -> 0; fade = |2t - 1| dips to black at the midpoint
+      // and returns, and the swap happens exactly at the bottom.
+      const t = state.transition;
+      post.settings.fade = Math.abs(2 * t - 1);
+      if (pendingTransition && t <= 0.5) { pendingTransition(); pendingTransition = null; }
+    } else {
+      post.settings.fade = 1;
+    }
+
     camera.update(dt, vw / vh);
     if (!panelOpen) camera.fly(input, dt, { baseFov: 62 });
     $('reticle').classList.toggle('off', !input.pointerLocked);
@@ -314,6 +492,30 @@ export async function main() {
       const budget = Math.min(stepAccumulator | 0, 8);
       for (let i = 0; i < budget; i++) { if (!pm.step()) break; }
       stepAccumulator -= (stepAccumulator | 0);
+    }
+
+    if (state.scale === 'stellar') {
+      stellar.advance(state.paused ? 0 : dt);
+      stellar.timeRate = state.yearsPerSecond;
+      stellar.layout();
+      const target = stellar.placed[state.targetBodyIndex];
+      if (state.orbitLock && target) {
+        camera.orbit.center.set(target.pos);
+        camera.orbit.minDistance = target.radius * 1.05;
+        camera.orbit.maxDistance = Math.max(target.radius * 4000, 200);
+        if (camera.mode !== 'orbit') {
+          camera.mode = 'orbit';
+          camera.orbit.distance = Math.max(target.radius * 4.2,
+            Math.hypot(camera.position[0] - target.pos[0], camera.position[1] - target.pos[1], camera.position[2] - target.pos[2]));
+        }
+        if (!panelOpen) camera.orbitUpdate(input, dt);
+      } else {
+        camera.mode = 'free';
+      }
+      // The near plane tracks the closest surface, which is the only way a
+      // single depth buffer can span a planet's horizon and the outer system.
+      const near = stellar.nearestSurface(camera.position);
+      camera.near = Math.max(1e-8, Math.min(0.02, Math.abs(near) * 0.02));
     }
 
     // --- draw ---
@@ -330,14 +532,27 @@ export async function main() {
       // needs no framebuffer readback and never hunts.
       const sigma = universe.cosmo.sigma8 * universe.cosmo.growth(universe.a);
       post.settings.exposure = state.baseExposure / (1 + 0.42 * sigma);
-      web.render(pm, camera, state.boxSize);
+
+      // Rebuilding the galaxy catalogue means reading particles back, which
+      // stalls the pipeline, so it happens only when the universe has actually
+      // changed enough to matter - a fixed fractional growth in scale factor.
+      if (state.showGalaxies && pm.a > 1 / 13 && pm.a > state.lastGalaxyA * 1.09) {
+        refreshGalaxies();
+      }
+
+      if (state.scale === 'cosmic') {
+        if (state.showDarkMatter) web.render(pm, camera, state.boxSize);
+        if (state.showGalaxies) galaxyRenderer.render(camera, state.boxSize);
+      }
     }
+    if (state.scale === 'stellar') stellar.render(camera, { time: now / 1000 });
 
     post.render(now / 1000, canvas.width, canvas.height);
 
     if (state.hudVisible) {
       hud.update({
         universe, camera, web, state, fps: fpsAvg,
+        galaxies: galaxyRenderer, stellar,
         pointerLocked: input.pointerLocked,
       });
     }
@@ -349,7 +564,18 @@ export async function main() {
 
   // Expose for debugging and for the automated visual tests.
   window.__opus = {
-    ctx, camera, universe, web, state, placeCamera, input,
+    ctx, camera, universe, web, state, placeCamera, input, galaxyRenderer, refreshGalaxies,
+    stellar, starfield, descendToSystem, ascendToCosmic, pickGalaxy, frameBody,
+    get halos() { return haloFinder ? haloFinder.halos : []; },
+    haloDiag() {
+      if (!haloFinder) return null;
+      return {
+        deltaVir: haloFinder.deltaVir,
+        particleMass: haloFinder.particleMass,
+        minResolvedMass: haloFinder.minResolvedMass,
+        linkingLengthMpc: haloFinder.linkingLengthMpc,
+      };
+    },
     get post() { return post; },
     // Renders one frame and reads it back before the compositor discards it.
     // Only meaningful when the context was created with preserveDrawingBuffer.

@@ -131,7 +131,12 @@ export function populate(halos, cosmo, { a = 1, boxSize = 150, seed = 1, maxGala
         spin: Math.max(0.01, h.spin * 0.7 * (0.5 + rng.f())),
         axis, pos, vel, sigmaV: h.sigmaV * 0.35,
         isSatellite: true,
-        quenchBoost: 1 - rFrac * 0.6,
+        // Environmental quenching needs two things: a host massive enough to
+        // hold a hot gaseous halo, and an orbit deep enough inside it for ram
+        // pressure and tidal stripping to act. Both together reproduce the
+        // morphology-density relation, where cluster cores are dominated by
+        // early types while the field is not.
+        quenchBoost: smooth(12.6, 14.2, Math.log10(h.mass)) * Math.max(0, 1 - rFrac * 1.7),
       }));
     }
   }
@@ -146,9 +151,12 @@ function makeGalaxy({ rng, cosmo, a, z, mHalo, mStar, rVir, spin, axis, pos, vel
   // Morphology. Massive galaxies are spheroids because their mergers destroyed
   // the disk; low-spin haloes cannot support a disk either; satellites deep in
   // a cluster have been stripped and quenched.
-  const massDrive = smooth(10.2, 11.4, logMStar);
-  const spinDrive = 1 - smooth(0.02, 0.06, spin);
-  const pEll = Math.min(0.97, massDrive * 0.75 + spinDrive * 0.3 + quenchBoost * 0.35);
+  // Mass is the dominant driver of morphology; spin and environment modulate
+  // it. Calibrated so the field is spiral-dominated while cluster cores invert
+  // to early types, which is the observed morphology-density relation.
+  const massDrive = smooth(10.4, 11.5, logMStar);
+  const spinDrive = 1 - smooth(0.015, 0.075, spin);
+  const pEll = Math.min(0.97, massDrive * 0.88 + spinDrive * 0.14 + quenchBoost * 0.72);
   let type;
   if (rng.f() < pEll) type = GALAXY_TYPE.ELLIPTICAL;
   else if (logMStar < 8.7) type = GALAXY_TYPE.IRREGULAR;

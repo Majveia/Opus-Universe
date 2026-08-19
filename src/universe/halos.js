@@ -1,16 +1,23 @@
-// Finds gravitationally bound structures in the simulated density field.
+// Finds gravitationally bound structures in the simulated particle set.
 //
-// Uses spherical overdensity: locate peaks in the density grid, then grow a
-// sphere around each until the mean enclosed density falls to the virial
-// threshold predicted for this cosmology. Particles inside that sphere give the
-// halo its bulk velocity, angular momentum and internal velocity dispersion -
-// so a galaxy placed here inherits its spin axis from the actual tidal torques
-// the simulation produced, rather than from a random number.
+// Uses friends-of-friends: two particles belong to the same halo if they lie
+// within a linking length of each other, and membership is transitive. With the
+// standard linking length of 0.2 mean interparticle separations, the groups
+// this picks out enclose roughly the virial overdensity - and, importantly, the
+// definition does not depend on any mesh, so it stays meaningful at whatever
+// resolution the device can afford. What changes with resolution is only the
+// smallest halo that can be resolved at all, which is reported alongside the
+// catalogue rather than hidden.
+//
+// Each halo's bulk velocity, angular momentum and internal dispersion come from
+// its own member particles, so a galaxy placed here inherits its spin axis from
+// the tidal torques the simulation actually produced.
 //
 // References:
-//   Bryan & Norman (1998), ApJ 495, 80          - virial overdensity
-//   Bullock et al. (2001), ApJ 555, 240         - spin parameter
-//   Behroozi, Wechsler & Conroy (2013), ApJ 770, 57 - stellar mass to halo mass
+//   Davis, Efstathiou, Frenk & White (1985), ApJ 292, 371 - friends-of-friends
+//   Bryan & Norman (1998), ApJ 495, 80                    - virial overdensity
+//   Bullock et al. (2001), ApJ 555, 240                   - spin parameter
+//   Behroozi, Wechsler & Conroy (2013), ApJ 770, 57       - stellar mass
 
 import { atlasIndex } from '../sim/atlas.js';
 
@@ -22,263 +29,209 @@ export class HaloFinder {
     this.layout = pm.layout;
     this.boxSize = pm.boxSize;
     this.halos = [];
-    this._grid = new Float32Array(this.n ** 3);
-  }
-
-  // Pulls the atlas-ordered density field into a grid-ordered array.
-  _readDensityGrid() {
-    const flat = this.pm.readDensity();
-    const n = this.n, g = this._grid, layout = this.layout, mean = this.pm.meanDensity;
-    for (let z = 0; z < n; z++) {
-      for (let y = 0; y < n; y++) {
-        for (let x = 0; x < n; x++) {
-          g[x + n * (y + n * z)] = flat[atlasIndex(layout, x, y, z)] / mean;
-        }
-      }
-    }
-    return g;
-  }
-
-  // 3x3x3 periodic box smoothing, twice: enough to stop single-cell shot noise
-  // from registering as a peak without erasing genuine substructure.
-  _smooth(src, passes = 1) {
+    const total = pm.particleCount;
+    this.particleMass = cosmology.rhoMeanComoving * Math.pow(pm.boxSize, 3) / total;
+    this._pos = new Float32Array(this.layout.width * this.layout.height * 4);
+    this._vel = new Float32Array(this.layout.width * this.layout.height * 4);
+    this._parent = new Int32Array(total);
+    this._size = new Int32Array(total);
+    this._atlasOf = new Int32Array(total);
+    let w = 0;
     const n = this.n;
-    let a = src, b = new Float32Array(n ** 3);
-    for (let p = 0; p < passes; p++) {
-      for (let z = 0; z < n; z++) {
-        const zm = ((z - 1) + n) % n, zp = (z + 1) % n;
-        for (let y = 0; y < n; y++) {
-          const ym = ((y - 1) + n) % n, yp = (y + 1) % n;
-          for (let x = 0; x < n; x++) {
-            const xm = ((x - 1) + n) % n, xp = (x + 1) % n;
-            // Separable 1-4-1 kernel applied as one gather; the weights below
-            // are the 3D product, normalised.
-            let s = 0;
-            for (const zz of [zm, z, zp]) {
-              const wz = zz === z ? 4 : 1;
-              for (const yy of [ym, y, yp]) {
-                const wy = yy === y ? 4 : 1;
-                s += wz * wy * (a[xm + n * (yy + n * zz)] + 4 * a[x + n * (yy + n * zz)] + a[xp + n * (yy + n * zz)]);
-              }
-            }
-            b[x + n * (y + n * z)] = s / 216;
-          }
-        }
-      }
-      const t = a; a = b; b = (t === src ? new Float32Array(n ** 3) : t);
+    for (let z = 0; z < n; z++) for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      this._atlasOf[w++] = atlasIndex(this.layout, x, y, z);
     }
-    return a;
+  }
+
+  _find(i) {
+    const p = this._parent;
+    let r = i;
+    while (p[r] !== r) r = p[r];
+    while (p[i] !== r) { const next = p[i]; p[i] = r; i = next; }
+    return r;
+  }
+
+  _union(a, b) {
+    let ra = this._find(a), rb = this._find(b);
+    if (ra === rb) return;
+    if (this._size[ra] < this._size[rb]) { const t = ra; ra = rb; rb = t; }
+    this._parent[rb] = ra;
+    this._size[ra] += this._size[rb];
   }
 
   /**
    * @param {object} o
-   * @param {number} o.a               current scale factor
-   * @param {number} o.peakThreshold   minimum overdensity for a peak
+   * @param {number} o.a              current scale factor
+   * @param {number} o.linkingLength  in units of the mean interparticle separation
+   * @param {number} o.minParticles   smallest group counted as a halo
    * @param {number} o.maxHalos
-   * @param {boolean} o.withKinematics read particles back for spin and dispersion
    */
-  find({ a = 1, peakThreshold = 20, maxHalos = 4000, withKinematics = true } = {}) {
-    const n = this.n;
-    const raw = this._readDensityGrid();
-    const rho = this._smooth(Float32Array.from(raw), 1);
+  find({ a = 1, linkingLength = 0.2, minParticles = 20, maxHalos = 4000 } = {}) {
+    const pm = this.pm;
+    const total = pm.particleCount;
+    const perSide = Math.round(Math.cbrt(total));
+    const pos = this._pos, vel = this._vel;
+    pm.posFBO[pm.curPos].readPixels(pos);
+    pm.velFBO[pm.curVel].readPixels(vel);
 
-    const deltaVir = this.cosmo.deltaVir(a);
-    const cellSize = this.boxSize / n;                 // Mpc/h
-    const cellVolume = cellSize ** 3;
-    const rhoMean = this.cosmo.rhoMeanComoving;        // Msun/h per (Mpc/h)^3
-    const massPerUnitDensity = rhoMean * cellVolume;   // mass of a cell at rho/rho_bar = 1
+    // Everything below works in box units, where the periodic volume is [0,1).
+    const b = linkingLength / perSide;
+    const b2 = b * b;
+    const K = Math.max(1, Math.min(1024, Math.floor(1 / b)));   // hash cells per side
+    const cell = 1 / K;
 
-    /* -- 1. local maxima above the threshold --------------------------- */
-    const peaks = [];
-    const at = (x, y, z) => rho[(((x % n) + n) % n) + n * ((((y % n) + n) % n) + n * (((z % n) + n) % n))];
-    for (let z = 0; z < n; z++) {
-      for (let y = 0; y < n; y++) {
-        for (let x = 0; x < n; x++) {
-          const v = rho[x + n * (y + n * z)];
-          if (v < peakThreshold) continue;
-          let isMax = true;
-          for (let dz = -1; dz <= 1 && isMax; dz++)
-            for (let dy = -1; dy <= 1 && isMax; dy++)
-              for (let dx = -1; dx <= 1 && isMax; dx++) {
-                if (!dx && !dy && !dz) continue;
-                if (at(x + dx, y + dy, z + dz) > v) isMax = false;
+    const parent = this._parent, size = this._size, atlasOf = this._atlasOf;
+    for (let i = 0; i < total; i++) { parent[i] = i; size[i] = 1; }
+
+    /* -- 1. bucket particles into a hash grid of cells about one linking
+           length across, so a neighbour search never leaves the 27 cells
+           around a particle ------------------------------------------------ */
+    const keys = new Int32Array(total);
+    const counts = new Int32Array(K * K * K + 1);
+    for (let i = 0; i < total; i++) {
+      const ai = atlasOf[i];
+      const cx = Math.min(K - 1, (pos[ai * 4] * K) | 0);
+      const cy = Math.min(K - 1, (pos[ai * 4 + 1] * K) | 0);
+      const cz = Math.min(K - 1, (pos[ai * 4 + 2] * K) | 0);
+      const k = cx + K * (cy + K * cz);
+      keys[i] = k;
+      counts[k + 1]++;
+    }
+    for (let i = 0; i < K * K * K; i++) counts[i + 1] += counts[i];
+    const order = new Int32Array(total);
+    const cursor = Int32Array.from(counts.subarray(0, K * K * K));
+    for (let i = 0; i < total; i++) order[cursor[keys[i]]++] = i;
+
+    /* -- 2. link neighbours ------------------------------------------- */
+    const wrapDelta = (d) => d - Math.round(d);
+    for (let cz = 0; cz < K; cz++) {
+      for (let cy = 0; cy < K; cy++) {
+        for (let cx = 0; cx < K; cx++) {
+          const k = cx + K * (cy + K * cz);
+          const s0 = counts[k], e0 = counts[k + 1];
+          if (s0 === e0) continue;
+          for (let dz = 0; dz <= 1; dz++) {
+            for (let dy = (dz === 0 ? 0 : -1); dy <= 1; dy++) {
+              for (let dx = (dz === 0 && dy === 0 ? 0 : -1); dx <= 1; dx++) {
+                const nx = (cx + dx + K) % K, ny = (cy + dy + K) % K, nz = (cz + dz + K) % K;
+                const nk = nx + K * (ny + K * nz);
+                if (nk < k && !(dx === 0 && dy === 0 && dz === 0)) {
+                  // Each unordered pair of cells is visited once; skip the mirror.
+                }
+                const s1 = counts[nk], e1 = counts[nk + 1];
+                if (s1 === e1) continue;
+                const same = nk === k;
+                for (let ii = s0; ii < e0; ii++) {
+                  const pi = order[ii];
+                  const ai = atlasOf[pi];
+                  const px = pos[ai * 4], py = pos[ai * 4 + 1], pz = pos[ai * 4 + 2];
+                  for (let jj = same ? ii + 1 : s1; jj < e1; jj++) {
+                    const pj = order[jj];
+                    const aj = atlasOf[pj];
+                    const ddx = wrapDelta(pos[aj * 4] - px);
+                    const ddy = wrapDelta(pos[aj * 4 + 1] - py);
+                    const ddz = wrapDelta(pos[aj * 4 + 2] - pz);
+                    if (ddx * ddx + ddy * ddy + ddz * ddz <= b2) this._union(pi, pj);
+                  }
+                }
               }
-          if (isMax) peaks.push({ x, y, z, v });
+            }
+          }
         }
       }
     }
-    peaks.sort((p, q) => q.v - p.v);
 
-    /* -- 2. grow spheres to the virial overdensity ---------------------- */
-    // Precomputed shell offsets, sorted by radius, so growth is a single sweep.
-    const maxR = Math.min(n / 2 - 1, 24);
-    const offsets = [];
-    for (let dz = -maxR; dz <= maxR; dz++)
-      for (let dy = -maxR; dy <= maxR; dy++)
-        for (let dx = -maxR; dx <= maxR; dx++) {
-          const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
-          if (r <= maxR) offsets.push({ dx, dy, dz, r });
-        }
-    offsets.sort((p, q) => p.r - q.r);
+    /* -- 3. collect groups -------------------------------------------- */
+    const groupOf = new Map();
+    for (let i = 0; i < total; i++) {
+      const r = this._find(i);
+      if (size[r] < minParticles) continue;
+      let g = groupOf.get(r);
+      if (!g) { g = []; groupOf.set(r, g); }
+      g.push(i);
+    }
 
-    const claimed = new Uint8Array(n ** 3);
+    const deltaVir = this.cosmo.deltaVir(a);
+    const rhoMean = this.cosmo.rhoMeanComoving;
     const halos = [];
 
-    for (const p of peaks) {
-      if (halos.length >= maxHalos) break;
-      if (claimed[p.x + n * (p.y + n * p.z)]) continue;
+    for (const members of groupOf.values()) {
+      const nMem = members.length;
+      const mass = nMem * this.particleMass;
 
-      let mass = 0, volume = 0;
-      let bestR = 0, bestMass = 0;
-      let cx = 0, cy = 0, cz = 0;
-      let i = 0;
-      // Sweep outward; the virial radius is the largest radius at which the
-      // mean enclosed overdensity still exceeds delta_vir.
-      while (i < offsets.length) {
-        const r = offsets[i].r;
-        while (i < offsets.length && offsets[i].r === r) {
-          const o = offsets[i];
-          const d = at(p.x + o.dx, p.y + o.dy, p.z + o.dz);
-          mass += d;
-          cx += d * o.dx; cy += d * o.dy; cz += d * o.dz;
-          volume += 1;
-          i++;
-        }
-        if (volume > 4) {
-          const meanEnclosed = mass / volume;
-          if (meanEnclosed >= deltaVir) { bestR = r; bestMass = mass; }
-          else if (bestR > 0) break;
-          else if (r > 3) break;               // never reached the threshold
-        }
+      // Centre of mass, computed relative to the first member so the periodic
+      // wrap never splits a halo straddling a box face.
+      const a0 = atlasOf[members[0]];
+      const rx0 = pos[a0 * 4], ry0 = pos[a0 * 4 + 1], rz0 = pos[a0 * 4 + 2];
+      let sx = 0, sy = 0, sz = 0, vx = 0, vy = 0, vz = 0;
+      for (const m of members) {
+        const ai = atlasOf[m];
+        sx += wrapDelta(pos[ai * 4] - rx0);
+        sy += wrapDelta(pos[ai * 4 + 1] - ry0);
+        sz += wrapDelta(pos[ai * 4 + 2] - rz0);
+        vx += vel[ai * 4]; vy += vel[ai * 4 + 1]; vz += vel[ai * 4 + 2];
       }
-      if (bestR < 0.9 || bestMass <= 0) continue;
+      sx /= nMem; sy /= nMem; sz /= nMem;
+      vx /= nMem; vy /= nMem; vz /= nMem;
+      const cxb = ((rx0 + sx) % 1 + 1) % 1;
+      const cyb = ((ry0 + sy) % 1 + 1) % 1;
+      const czb = ((rz0 + sz) % 1 + 1) % 1;
 
-      const comX = p.x + cx / mass, comY = p.y + cy / mass, comZ = p.z + cz / mass;
+      // Angular momentum and dispersion about that centre.
+      let lx = 0, ly = 0, lz = 0, v2 = 0;
+      for (const m of members) {
+        const ai = atlasOf[m];
+        const dx = wrapDelta(pos[ai * 4] - cxb);
+        const dy = wrapDelta(pos[ai * 4 + 1] - cyb);
+        const dz = wrapDelta(pos[ai * 4 + 2] - czb);
+        const ux = vel[ai * 4] - vx, uy = vel[ai * 4 + 1] - vy, uz = vel[ai * 4 + 2] - vz;
+        lx += dy * uz - dz * uy;
+        ly += dz * ux - dx * uz;
+        lz += dx * uy - dy * ux;
+        v2 += ux * ux + uy * uy + uz * uz;
+      }
+      const lLen = Math.hypot(lx, ly, lz) || 1e-30;
+      const sigmaV = Math.sqrt(v2 / nMem / 3);
 
-      // Mark the volume as taken so substructure is not counted twice.
-      const rad = Math.ceil(bestR);
-      for (let dz = -rad; dz <= rad; dz++)
-        for (let dy = -rad; dy <= rad; dy++)
-          for (let dx = -rad; dx <= rad; dx++) {
-            if (dx * dx + dy * dy + dz * dz > bestR * bestR) continue;
-            const xx = (((p.x + dx) % n) + n) % n, yy = (((p.y + dy) % n) + n) % n, zz = (((p.z + dz) % n) + n) % n;
-            claimed[xx + n * (yy + n * zz)] = 1;
-          }
+      // Virial radius from the mass and the epoch's virial overdensity.
+      const rVir = Math.cbrt(3 * mass / (4 * Math.PI * deltaVir * rhoMean));
 
+      // Bullock spin parameter: dimensionless, so the internal units cancel.
+      const specificJ = lLen / nMem;                     // box units
+      const vVir = sigmaV * Math.SQRT2 || 1e-12;
+      const spin = Math.max(0.005, Math.min(0.3,
+        specificJ / (Math.SQRT2 * vVir * (rVir / this.boxSize) + 1e-30)));
+
+      const n = this.n;
       halos.push({
-        // Position in box units [0,1)
-        pos: [((comX / n) % 1 + 1) % 1, ((comY / n) % 1 + 1) % 1, ((comZ / n) % 1 + 1) % 1],
-        cell: [p.x, p.y, p.z],
-        rVir: bestR * cellSize,                        // Mpc/h
-        mass: bestMass * massPerUnitDensity,           // Msun/h
-        peak: p.v,
-        vel: [0, 0, 0],
-        spinAxis: [0, 1, 0],
-        spin: 0.035,
-        sigmaV: 0,
-        nParticles: 0,
+        pos: [cxb, cyb, czb],
+        cell: [Math.min(n - 1, (cxb * n) | 0), Math.min(n - 1, (cyb * n) | 0), Math.min(n - 1, (czb * n) | 0)],
+        rVir,
+        mass,
+        vel: [vx, vy, vz],
+        spinAxis: [lx / lLen, ly / lLen, lz / lLen],
+        spin,
+        sigmaV,
+        nParticles: nMem,
       });
     }
 
     halos.sort((h, g) => g.mass - h.mass);
+    if (halos.length > maxHalos) halos.length = maxHalos;
     this.halos = halos;
-    if (withKinematics && halos.length) this._measureKinematics(halos);
     this.deltaVir = deltaVir;
     this.scaleFactor = a;
+    this.minResolvedMass = minParticles * this.particleMass;
+    this.linkingLengthMpc = b * this.boxSize;
     return halos;
   }
 
-  // Reads particles back once and assigns them to haloes through a uniform
-  // spatial hash, then measures each halo's bulk motion and angular momentum.
-  _measureKinematics(halos) {
-    const pm = this.pm, n = this.n, layout = this.layout;
-    const posFlat = new Float32Array(layout.width * layout.height * 4);
-    const velFlat = new Float32Array(layout.width * layout.height * 4);
-    pm.posFBO[pm.curPos].readPixels(posFlat);
-    pm.velFBO[pm.curVel].readPixels(velFlat);
-
-    // Bucket particles by cell so each halo only scans its own neighbourhood.
-    const nCells = n ** 3;
-    const counts = new Int32Array(nCells + 1);
-    const total = pm.particleCount;
-    const cellOf = new Int32Array(total);
-    const atlasOf = new Int32Array(total);
-
-    let w = 0;
-    for (let z = 0; z < n; z++) for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
-      const ai = atlasIndex(layout, x, y, z);
-      atlasOf[w] = ai;
-      const px = posFlat[ai * 4], py = posFlat[ai * 4 + 1], pz = posFlat[ai * 4 + 2];
-      const ci = Math.min(n - 1, Math.floor(px * n)) + n * (Math.min(n - 1, Math.floor(py * n)) + n * Math.min(n - 1, Math.floor(pz * n)));
-      cellOf[w] = ci;
-      counts[ci + 1]++;
-      w++;
-    }
-    for (let i = 0; i < nCells; i++) counts[i + 1] += counts[i];
-    const order = new Int32Array(total);
-    const cursor = Int32Array.from(counts.subarray(0, nCells));
-    for (let i = 0; i < total; i++) order[cursor[cellOf[i]]++] = i;
-
-    const cellSize = this.boxSize / n;
-    const wrapDelta = (d) => d - Math.round(d);          // periodic separation in box units
-
-    for (const h of halos) {
-      const rBox = h.rVir / this.boxSize;
-      const rCells = Math.ceil(h.rVir / cellSize) + 1;
-      const c0 = h.cell;
-      let m = 0, vx = 0, vy = 0, vz = 0;
-      let lx = 0, ly = 0, lz = 0;
-      let v2 = 0;
-      const members = [];
-
-      for (let dz = -rCells; dz <= rCells; dz++)
-        for (let dy = -rCells; dy <= rCells; dy++)
-          for (let dx = -rCells; dx <= rCells; dx++) {
-            const xx = (((c0[0] + dx) % n) + n) % n, yy = (((c0[1] + dy) % n) + n) % n, zz = (((c0[2] + dz) % n) + n) % n;
-            const ci = xx + n * (yy + n * zz);
-            for (let k = counts[ci]; k < counts[ci + 1]; k++) {
-              const pi = order[k];
-              const ai = atlasOf[pi];
-              const rx = wrapDelta(posFlat[ai * 4] - h.pos[0]);
-              const ry = wrapDelta(posFlat[ai * 4 + 1] - h.pos[1]);
-              const rz = wrapDelta(posFlat[ai * 4 + 2] - h.pos[2]);
-              if (rx * rx + ry * ry + rz * rz > rBox * rBox) continue;
-              members.push([rx, ry, rz, velFlat[ai * 4], velFlat[ai * 4 + 1], velFlat[ai * 4 + 2]]);
-              m += 1;
-              vx += velFlat[ai * 4]; vy += velFlat[ai * 4 + 1]; vz += velFlat[ai * 4 + 2];
-            }
-          }
-
-      if (m < 8) { h.nParticles = m; continue; }
-      vx /= m; vy /= m; vz /= m;
-      for (const [rx, ry, rz, ux, uy, uz] of members) {
-        const dx = ux - vx, dy = uy - vy, dz = uz - vz;
-        lx += ry * dz - rz * dy;
-        ly += rz * dx - rx * dz;
-        lz += rx * dy - ry * dx;
-        v2 += dx * dx + dy * dy + dz * dz;
-      }
-      const lLen = Math.hypot(lx, ly, lz) || 1;
-      h.vel = [vx, vy, vz];
-      h.spinAxis = [lx / lLen, ly / lLen, lz / lLen];
-      h.sigmaV = Math.sqrt(v2 / m / 3);
-      h.nParticles = m;
-
-      // Bullock spin parameter, lambda' = J / (sqrt(2) M V_vir R_vir), computed
-      // in the simulation's internal units - dimensionless, so units cancel.
-      const specificJ = lLen / m;
-      const vVir = h.sigmaV * Math.sqrt(3) || 1e-9;
-      h.spin = Math.min(0.3, specificJ / (Math.SQRT2 * vVir * rBox + 1e-30));
-    }
-  }
-
-  // Measured halo mass function, in number per (Mpc/h)^3 per dex, for
-  // comparison against the Sheth-Tormen prediction.
+  // Measured halo mass function, in number per (Mpc/h)^3 per dex.
   massFunction(bins = 8) {
     const hs = this.halos.filter((h) => h.mass > 0);
     if (!hs.length) return [];
     const lo = Math.log10(Math.min(...hs.map((h) => h.mass)));
-    const hi = Math.log10(Math.max(...hs.map((h) => h.mass)));
+    const hi = Math.log10(Math.max(...hs.map((h) => h.mass))) + 1e-6;
     const V = this.boxSize ** 3;
     const width = (hi - lo) / bins;
     const out = [];
@@ -300,7 +253,7 @@ export function stellarMassFromHalo(mHalo, a = 1) {
   const z = 1 / a - 1;
   const nu = Math.exp(-4 * a * a);
   const logM1 = 11.514 + nu * (-1.793 * (a - 1) - 0.251 * z);
-  const logEps = -1.777 + nu * (-0.006 * (a - 1) - 0.000 * z) - 0.119 * (a - 1);
+  const logEps = -1.777 + nu * (-0.006 * (a - 1)) - 0.119 * (a - 1);
   const alpha = -1.412 + nu * (0.731 * (a - 1));
   const delta = 3.508 + nu * (2.608 * (a - 1) - 0.043 * z);
   const gamma = 0.316 + nu * (1.319 * (a - 1) + 0.279 * z);
@@ -309,6 +262,5 @@ export function stellarMassFromHalo(mHalo, a = 1) {
     delta * Math.pow(Math.log10(1 + Math.exp(x)), gamma) / (1 + Math.exp(Math.pow(10, -x)));
 
   const x = Math.log10(mHalo) - logM1;
-  const logMstar = logEps + logM1 + f(x) - f(0);
-  return Math.pow(10, logMstar);
+  return Math.pow(10, logEps + logM1 + f(x) - f(0));
 }

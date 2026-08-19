@@ -128,6 +128,15 @@
   #keys.on { opacity: 1; }
   #keys kbd { color: var(--ink-dim); font-family: var(--mono); }
 
+  #target { position: absolute; left: 24px; top: 148px; max-width: 330px;
+            font-size: 11px; line-height: 1.75; color: var(--ink-dim); font-family: var(--mono);
+            font-variant-numeric: tabular-nums; opacity: 0; transition: opacity 500ms; }
+  #target.on { opacity: 1; }
+  #target .h { color: var(--ink); font-size: 12.5px; letter-spacing: .02em; }
+  #target .k { color: var(--ink-faint); display: inline-block; min-width: 108px; }
+  #target .hz { color: var(--warm); }
+  @media (max-width: 720px) { #target { display: none; } }
+
   #hint { position: absolute; left: 50%; bottom: 108px; transform: translateX(-50%);
           font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase; color: var(--ink-faint);
           transition: opacity 600ms; }
@@ -159,11 +168,14 @@
     <div class="phase" id="phaseValue">dark ages</div>
   </div>
 
+  <div id="target"></div>
+
   <div id="telemetry">
     <div class="row"><span class="k">scale factor</span><span class="v" id="tAcale">0.0200</span></div>
     <div class="row"><span class="k">structure &sigma;</span><span class="v" id="tSigma">0.00</span></div>
     <div class="row"><span class="k">particles</span><span class="v" id="tParticles">0</span></div>
     <div class="row"><span class="k">splats</span><span class="v" id="tSplats">0</span></div>
+    <div class="row"><span class="k">galaxies</span><span class="v" id="tGalaxies">0</span></div>
     <div class="row"><span class="k">speed</span><span class="v" id="tSpeed">0</span></div>
     <div class="row"><span class="k">fps</span><span class="v" id="tFps">0</span></div>
   </div>
@@ -172,6 +184,8 @@
     <div><kbd>W A S D</kbd> fly &nbsp; <kbd>space/shift</kbd> up-down &nbsp; <kbd>Q E</kbd> roll</div>
     <div><kbd>drag</kbd> look &nbsp; <kbd>scroll</kbd> speed &nbsp; <kbd>F</kbd> boost</div>
     <div><kbd>P</kbd> pause time &nbsp; <kbd>[ ]</kbd> rate &nbsp; <kbd>R</kbd> new universe</div>
+    <div><kbd>X</kbd> descend into &nbsp; <kbd>Z</kbd> back out &nbsp; <kbd>T</kbd> next body &nbsp; <kbd>O</kbd> orbit lock</div>
+    <div><kbd>M</kbd> dark matter &nbsp; <kbd>G</kbd> galaxies</div>
     <div><kbd>1..4</kbd> vantage &nbsp; <kbd>TAB</kbd> controls &nbsp; <kbd>H</kbd> interface</div>
   </div>
 
