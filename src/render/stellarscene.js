@@ -39,6 +39,7 @@ export class StellarScene {
     this.timeYears = 0;
     this.timeRate = 0.08;          // years of simulated time per second
     this.exposure = 1;
+    this.showOrbits = true;
     // Every body's current world position, refreshed each frame, so the camera,
     // targeting and HUD all read the same state the renderer draws.
     this.placed = [];
@@ -134,7 +135,31 @@ export class StellarScene {
       return db - da;
     });
 
-    // Debris rings first: they sit behind everything and only add light.
+    // Orbit paths, faint, behind everything.
+    if (this.showOrbits) {
+      const originRel = rel([0, 0, 0]);
+      for (const p of s.planets) {
+        // Fade out once the camera is close enough that a line across the sky
+        // would be a distraction rather than a map.
+        const camR = Math.hypot(cam[0], cam[1], cam[2]);
+        const opacity = 0.05 * (1 - Math.exp(-camR / (p.semiMajorAU * 0.35)));
+        if (opacity < 0.002) continue;
+        const warm = p.habitable ? [0.55, 0.85, 1.0] : [0.55, 0.62, 0.85];
+        bodies.drawOrbit(camera, {
+          centre: originRel,
+          semiMajorAU: p.semiMajorAU,
+          eccentricity: p.eccentricity,
+          inclination: p.inclination,
+          longitudeAscending: p.longitudeAscending,
+          argumentPeriapsis: p.argumentPeriapsis,
+          colour: warm,
+          opacity,
+          segments: 192,
+        });
+      }
+    }
+
+    // Debris rings next: they sit behind everything and only add light.
     for (const belt of s.belts) {
       bodies.drawBelt(camera, {
         centre: rel([0, 0, 0]),
@@ -151,14 +176,15 @@ export class StellarScene {
 
     for (const b of sorted) {
       if (b.kind === 'star') {
-        const L = b.ref.luminosity;
         bodies.drawStar(camera, {
           centre: rel(b.pos),
           radius: b.radius,
           temperature: b.ref.temperature,
+          luminosity: b.ref.luminosity,
           // Surface brightness of a star does not depend on distance; the glare
-          // around it does, and that is handled in the shader.
-          brightness: 2.4 * this.exposure,
+          // around it does, and both are handled in the shader.
+          surface: 9.0 * this.exposure,
+          glare: 26.0 * this.exposure,
           time, seed: (b.ref.mass * 1000) % 1000,
         });
         continue;

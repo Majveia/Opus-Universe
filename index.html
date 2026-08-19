@@ -142,6 +142,24 @@
           transition: opacity 600ms; }
   #hint.gone { opacity: 0; }
 
+  /* Keyboard focus must be visible on the controls; the page is otherwise
+     entirely mouse-and-key driven and the panel is the only tab stop. */
+  #panel input[type=range]:focus-visible,
+  #panel select:focus-visible,
+  #panel .btn:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 3px;
+  }
+  #panel .btn:focus-visible { color: var(--ink); }
+
+  /* Honour a reduced-motion preference: the simulation itself still runs -
+     that is the content - but the interface stops sliding and fading. */
+  @media (prefers-reduced-motion: reduce) {
+    .hud, #loader, #panel, #keys, #hint, #target, #timeline .fill,
+    #loader .bar i, #panel .btn { transition: none !important; }
+    #panel { transform: translateY(-50%) !important; }
+  }
+
   #error { position: fixed; inset: 0; z-index: 100; background: #000; display: none;
            align-items: center; justify-content: center; padding: 40px; }
   #error div { max-width: 560px; font-family: var(--mono); font-size: 12px; line-height: 1.7;

@@ -35,7 +35,9 @@ try {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   const query = process.env.OPUS_QUERY || 'preserve=1&maxpixels=921600&seed=20240819';
-  await page.goto(`${origin}/index.html?${query}`, { waitUntil: 'load' });
+  const pagePath = process.env.OPUS_PAGE || '/index.html';
+  await page.goto(`${origin}${pagePath}?${query}`, { waitUntil: 'load' });
+  console.log(`  page: ${pagePath}`);
 
   console.log('waiting for the universe to be built...');
   await page.waitForFunction(() => document.getElementById('loader').classList.contains('done'), { timeout: 180000 });

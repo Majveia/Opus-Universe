@@ -189,10 +189,22 @@ void surface(vec3 n, out vec3 albedo, out vec3 emissive, out float gloss) {
 
   if (uType == 7 || uType == 6) {
     // --- giants: zonal bands sheared by differential rotation --------
-    float band = n.z * 9.0 + 1.6 * fbm(vec3(p.xy * 1.4, n.z * 5.0), 4);
+    // Band count and palette vary with the seed: some worlds come out like
+    // Jupiter's browns and creams, others like Saturn's flat gold or the deep
+    // blue of an ice giant whose methane absorbs the red.
+    float nBands = 7.0 + 8.0 * fract(seed * 0.137);
+    float band = n.z * nBands + 1.8 * fbm(vec3(p.xy * 1.4, n.z * 5.0), 4);
     float t = 0.5 + 0.5 * sin(band);
-    vec3 c1 = uType == 7 ? vec3(0.86, 0.74, 0.56) : vec3(0.42, 0.66, 0.86);
-    vec3 c2 = uType == 7 ? vec3(0.62, 0.44, 0.30) : vec3(0.24, 0.42, 0.72);
+    t = smoothstep(0.18, 0.82, t);          // crisper zone/belt boundaries
+    float hue = fract(seed * 0.311);
+    vec3 c1, c2;
+    if (uType == 7) {
+      c1 = mix(vec3(0.92, 0.84, 0.68), vec3(0.90, 0.72, 0.42), hue);
+      c2 = mix(vec3(0.52, 0.33, 0.20), vec3(0.66, 0.46, 0.24), hue);
+    } else {
+      c1 = mix(vec3(0.48, 0.74, 0.90), vec3(0.36, 0.60, 0.88), hue);
+      c2 = mix(vec3(0.16, 0.34, 0.66), vec3(0.22, 0.46, 0.74), hue);
+    }
     albedo = mix(c1, c2, t);
     // Storms: long-lived anticyclones stretched by the zonal flow.
     float storm = fbm(vec3(p.x * 2.2, p.y * 2.2, p.z * 6.0), 4);
@@ -341,7 +353,7 @@ void main() {
           float fine = 0.5 + 0.5 * sin(u * 220.0 + uRingSeed * 13.0);
           float mid = 0.5 + 0.5 * sin(u * 41.0 + uRingSeed * 3.0);
           float gap = smoothstep(0.02, 0.06, abs(fract(u * 3.0 + 0.21) - 0.5));
-          float dens = uRingOpacity * gap * (0.45 + 0.35 * mid + 0.20 * fine)
+          float dens = uRingOpacity * gap * (0.55 + 0.30 * mid + 0.15 * fine)
                      * smoothstep(0.0, 0.06, u) * (1.0 - smoothstep(0.85, 1.0, u));
 
           // Is this piece of the ring in the planet's shadow?
@@ -352,7 +364,10 @@ void main() {
           float mu = dot(rd, uSunDir);
           float fwd = 0.35 + 0.65 * pow(max(mu, 0.0), 6.0);
           vec3 ringCol = mix(vec3(0.78, 0.74, 0.66), vec3(0.92, 0.90, 0.86), fine);
-          vec3 ringLit = ringCol * uSunColour * lit * (0.35 + fwd) * 0.5;
+          // Ring particles are icy and highly reflective; a Bond albedo near
+          // 0.5 with strong forward scattering is what makes Saturn's rings
+          // comparable in brightness to the planet itself.
+          vec3 ringLit = ringCol * uSunColour * lit * (0.35 + fwd) * 1.8;
 
           // Slant path: a grazing view crosses more material.
           float slant = clamp(dens / max(abs(denom), 0.02), 0.0, 1.0);
@@ -400,7 +415,9 @@ out vec4 fragColor;
 uniform vec3 uCentre;
 uniform float uRadius;
 uniform float uTemperature;
-uniform float uBrightness;
+uniform float uLuminosity;   // solar luminosities
+uniform float uSurface;      // exposure of the resolved photosphere
+uniform float uGlare;        // exposure of the unresolved glare
 uniform float uTime;
 uniform float uSeed;
 ${HASH_GLSL}
@@ -418,26 +435,33 @@ void main() {
   if (t.x > 0.0) {
     vec3 n = normalize(rd * t.x - uCentre);
     float mu = max(dot(n, -rd), 0.0);
-    // Limb darkening: the line of sight at the edge of the disc reaches only
-    // the cooler upper photosphere. Eddington's linear law.
+    // Limb darkening: a line of sight at the edge of the disc reaches only the
+    // cooler upper photosphere. Eddington's linear law.
     float limb = 0.35 + 0.65 * mu;
     // Granulation: the tops of convection cells, a few percent in contrast.
     float gran = fbm(n * 26.0 + vec3(uTime * 0.04, uSeed, 0.0), 4);
     float faculae = smoothstep(0.25, 0.6, gran);
-    colour = base * uBrightness * limb * (0.94 + 0.16 * faculae);
-    // Hotter cores read as whiter than the surface blackbody alone.
+    // Surface brightness follows Stefan-Boltzmann, so it does not depend on
+    // distance at all - only on temperature. A 3000 K red dwarf's photosphere
+    // really is around thirty times dimmer per unit area than the Sun's, and
+    // that is why it looks like an ember rather than a spotlight.
+    float sb = pow(uTemperature / 5772.0, 4.0);
+    colour = base * uSurface * sb * limb * (0.94 + 0.16 * faculae);
     colour = mix(colour, vec3(1.0), pow(mu, 8.0) * 0.35);
   }
 
-  // Corona and glare: a wide inverse-square halo plus a tighter core, both
-  // scaled so the star's total flux is what its luminosity says it is.
+  // Glare from the unresolved star. Its strength is the flux actually arriving,
+  // L / d^2, in units of the Sun's at one astronomical unit - which is why a
+  // dim star still blazes when you are close to it and a bright one fades when
+  // you are far away.
+  float flux = uLuminosity / max(d * d, 1e-12);
   float ang = length(cross(rd, normalize(uCentre)));
   float angR = uRadius / max(d, 1e-9);
   float halo = angR / max(ang, angR * 0.35);
-  float glow = pow(halo, 2.4) * 0.55 + pow(halo, 6.0) * 0.9;
-  colour += base * uBrightness * glow * 0.5;
+  float profile = pow(halo, 2.4) * 0.55 + pow(halo, 6.0) * 0.9;
+  colour += base * uGlare * flux * profile;
 
-  if (dot(colour, vec3(1.0)) < 1e-5) discard;
+  if (dot(colour, vec3(1.0)) < 1e-6) discard;
   fragColor = vec4(colour, 1.0);
 }`;
 
@@ -516,6 +540,48 @@ void main() {
   fragColor = vec4(vColour * (vIntensity * exp(-r2 * 2.6)), 1.0);
 }`;
 
+/* ----------------------------------------------------------- orbit paths -- */
+
+// A planet's orbit drawn as the ellipse it actually is: the vertex shader walks
+// the eccentric anomaly, so the curve is denser near periapsis exactly where
+// the planet moves fastest, and an eccentric orbit is visibly off-centre from
+// its star.
+const ORBIT_VS = `#version 300 es
+precision highp float;
+uniform mat4 uViewProjRel;
+uniform vec3 uCentre;       // the star, relative to the camera
+uniform float uA;           // semi-major axis
+uniform float uE;
+uniform float uInc;
+uniform float uNode;
+uniform float uPeri;
+uniform int uSegments;
+out float vT;
+
+void main() {
+  float E = 6.28318530718 * float(gl_VertexID) / float(uSegments);
+  float x = uA * (cos(E) - uE);
+  float y = uA * sqrt(max(1.0 - uE * uE, 0.0)) * sin(E);
+
+  float cw = cos(uPeri), sw = sin(uPeri);
+  float cO = cos(uNode), sO = sin(uNode);
+  float ci = cos(uInc), si = sin(uInc);
+  float x1 = x * cw - y * sw;
+  float y1 = x * sw + y * cw;
+  vec3 p = vec3(x1 * cO - y1 * ci * sO, y1 * si, x1 * sO + y1 * ci * cO);
+
+  gl_Position = uViewProjRel * vec4(uCentre + p, 1.0);
+  vT = float(gl_VertexID) / float(uSegments);
+}`;
+
+const ORBIT_FS = `#version 300 es
+precision highp float;
+in float vT;
+out vec4 fragColor;
+uniform vec3 uColour;
+uniform float uOpacity;
+void main() { fragColor = vec4(uColour * uOpacity, 1.0); }`;
+
 /* ---------------------------------------------------------------- driver -- */
 
 export class BodyRenderer {
@@ -525,6 +591,7 @@ export class BodyRenderer {
     this.progPlanet = ctx.program(IMPOSTOR_VS, PLANET_FS, 'planet');
     this.progStar = ctx.program(IMPOSTOR_VS, STAR_FS, 'star');
     this.progBelt = ctx.program(BELT_VS, POINT_FS, 'belt');
+    this.progOrbit = ctx.program(ORBIT_VS, ORBIT_FS, 'orbit-path');
     this.vao = ctx.gl.createVertexArray();
     this._vp = m4();
     this._tmp = v3();
@@ -554,7 +621,7 @@ export class BodyRenderer {
     gl.blendFunc(gl.ONE, gl.ONE);
   }
 
-  drawStar(camera, { centre, radius, temperature, brightness, time, seed }) {
+  drawStar(camera, { centre, radius, temperature, luminosity, surface, glare, time, seed }) {
     this._addBlend();
     const p = this.progStar.use()
       .set('uViewProjRel', this._vp)
@@ -565,7 +632,9 @@ export class BodyRenderer {
       // The quad must be large enough to hold the glare, not just the disc.
       .set('uQuadRadius', Math.max(radius * 26, Math.hypot(centre[0], centre[1], centre[2]) * 0.34))
       .set('uTemperature', temperature)
-      .set('uBrightness', brightness)
+      .set('uLuminosity', luminosity)
+      .set('uSurface', surface)
+      .set('uGlare', glare)
       .set('uTime', time)
       .set('uSeed', seed);
     this.gl.drawArrays(this.gl.TRIANGLES, 0, 6);
@@ -624,6 +693,24 @@ export class BodyRenderer {
       .set('uBrightness', o.brightness)
       .set('uSunColour', o.sunColour);
     this.gl.drawArrays(this.gl.POINTS, 0, o.count);
+    this.ctx.drawCalls++;
+  }
+
+  drawOrbit(camera, o) {
+    this._addBlend();
+    const segments = o.segments || 256;
+    this.progOrbit.use()
+      .set('uViewProjRel', this._vp)
+      .set('uCentre', o.centre)
+      .set('uA', o.semiMajorAU)
+      .set('uE', o.eccentricity || 0)
+      .set('uInc', o.inclination || 0)
+      .set('uNode', o.longitudeAscending || 0)
+      .set('uPeri', o.argumentPeriapsis || 0)
+      .set('uSegments', segments)
+      .set('uColour', o.colour)
+      .set('uOpacity', o.opacity);
+    this.gl.drawArrays(this.gl.LINE_LOOP, 0, segments);
     this.ctx.drawCalls++;
   }
 

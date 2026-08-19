@@ -28,13 +28,16 @@ out float vIntensity;
 void main() {
   // Placed far away and never translated: the sky does not move with the ship.
   gl_Position = uViewProjRel * vec4(aDir * 1.0e7, 1.0);
-  float flux = aColour.w;
+  float flux = aColour.w;      // already compressed to [0,1] by the generator
   // Bright stars are drawn slightly larger, which is how the eye and every
-  // camera read them; the flux is preserved by dimming the peak to match.
+  // camera read them; spreading the same flux over more pixels means the peak
+  // has to come down to match, hence the division by the area.
   float size = clamp(1.0 + log(1.0 + flux * 60.0) * 0.75, 1.0, 7.0);
   gl_PointSize = size;
   vColour = aColour.rgb;
-  vIntensity = uBrightness * flux / (size * size);
+  // uBrightness carries the area factor: with flux normalised so the brightest
+  // star in the sky is 1, a bare flux/size^2 would peak near 1/49 and vanish.
+  vIntensity = uBrightness * flux * 26.0 / (size * size);
 }`;
 
 const FS = `#version 300 es
@@ -59,7 +62,7 @@ export class Starfield {
     this.dirBuf = ctx.gl.createBuffer();
     this.colBuf = ctx.gl.createBuffer();
     this.count = 0;
-    this.brightness = 0.5;
+    this.brightness = 1.6;
     this._vp = m4();
   }
 

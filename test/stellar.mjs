@@ -99,7 +99,15 @@ try {
     await page.waitForTimeout(700);
     await shot(name);
     const lum = await page.evaluate(() => window.__opus.measureFrame());
+    const framed = await page.evaluate(() => {
+      const o = window.__opus;
+      const b = o.stellar.placed[o.state.targetBodyIndex];
+      const c = o.camera.position;
+      const d = Math.hypot(b.pos[0] - c[0], b.pos[1] - c[1], b.pos[2] - c[2]);
+      return { label: b.label, index: o.state.targetBodyIndex, radii: d / b.radius, lock: o.state.orbitLock };
+    });
     console.log(`  ${name}: mean luma ${lum.meanLuma.toFixed(2)}, lit ${(lum.litFraction * 100).toFixed(1)}%, peak ${lum.maxLuma.toFixed(0)}`);
+    console.log(`     framed [${framed.index}] ${framed.label} at ${framed.radii.toFixed(1)} radii, orbit lock ${framed.lock}`);
     check(`${name} is visible`, lum.maxLuma > 25, `peak ${lum.maxLuma.toFixed(0)}`);
   }
 

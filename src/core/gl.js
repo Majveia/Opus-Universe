@@ -321,7 +321,13 @@ export class Framebuffer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.handle);
     gl.readBuffer(gl.COLOR_ATTACHMENT0 + attachment);
     const t = this.textures[attachment];
-    gl.readPixels(x, y, w, h, t.format, t.type, out);
+    // A half-float attachment cannot be read into a Float32Array with its own
+    // storage type; float colour buffers accept RGBA/FLOAT instead. Getting
+    // this wrong fails silently and returns a buffer of zeros, which is a
+    // remarkably convincing way to look like a rendering bug.
+    let type = t.type;
+    if (type === gl.HALF_FLOAT && out instanceof Float32Array) type = gl.FLOAT;
+    gl.readPixels(x, y, w, h, t.format, type, out);
     return out;
   }
 
