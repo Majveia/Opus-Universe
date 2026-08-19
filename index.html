@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Opus Universe</title>
+<meta name="description" content="An interactive, physically simulated universe: structure formation in an expanding cosmos, rendered in real time.">
+<style>
+  :root {
+    --ink:        rgba(255,255,255,0.92);
+    --ink-dim:    rgba(255,255,255,0.46);
+    --ink-faint:  rgba(255,255,255,0.22);
+    --rule:       rgba(255,255,255,0.09);
+    --accent:     #a8d8ff;
+    --warm:       #ffc38a;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Roboto Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: #000; color: var(--ink);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overscroll-behavior: none;
+    touch-action: none;
+  }
+  #view { position: fixed; inset: 0; display: block; width: 100%; height: 100%; background: #000; cursor: crosshair; }
+
+  /* ---------------------------------------------------------------- HUD -- */
+  .hud { position: fixed; inset: 0; pointer-events: none; z-index: 10;
+         opacity: 0; transition: opacity 900ms cubic-bezier(.2,.7,.3,1); }
+  .hud.on { opacity: 1; }
+  .hud.hidden { opacity: 0 !important; }
+
+  .label { font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase;
+           color: var(--ink-faint); font-family: var(--sans); font-weight: 500; }
+  .value { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  /* top-left epoch readout */
+  #epoch { position: absolute; top: max(22px, env(safe-area-inset-top)); left: 24px; }
+  #epoch .z { font-family: var(--mono); font-size: 40px; line-height: 1; font-weight: 200;
+              letter-spacing: -0.02em; color: var(--ink); font-variant-numeric: tabular-nums; }
+  #epoch .z small { font-size: 15px; color: var(--ink-dim); font-weight: 300; margin-left: 3px; }
+  #epoch .sub { margin-top: 7px; font-size: 11.5px; color: var(--ink-dim); font-family: var(--mono);
+                font-variant-numeric: tabular-nums; }
+  #epoch .phase { margin-top: 3px; font-size: 10px; letter-spacing: .13em; text-transform: uppercase;
+                  color: var(--warm); opacity: .8; }
+
+  /* top-right telemetry */
+  #telemetry { position: absolute; top: max(24px, env(safe-area-inset-top)); right: 24px; text-align: right; }
+  #telemetry .row { display: flex; justify-content: flex-end; gap: 12px; align-items: baseline;
+                    font-size: 11.5px; margin-bottom: 3px; }
+  #telemetry .row .k { color: var(--ink-faint); font-size: 9.5px; letter-spacing: .13em;
+                       text-transform: uppercase; }
+  #telemetry .row .v { font-family: var(--mono); color: var(--ink-dim); min-width: 88px;
+                       font-variant-numeric: tabular-nums; }
+
+  /* bottom timeline */
+  #timeline { position: absolute; left: 24px; right: 24px; bottom: max(26px, env(safe-area-inset-bottom));
+              pointer-events: auto; }
+  #timeline .track { position: relative; height: 1px; background: var(--rule); }
+  #timeline .fill { position: absolute; left: 0; top: 0; height: 1px; background: linear-gradient(90deg, rgba(168,216,255,.15), var(--accent)); }
+  #timeline .head { position: absolute; top: -3px; width: 1px; height: 7px; background: var(--ink); }
+  #timeline .ticks { position: relative; height: 14px; margin-top: 5px; }
+  #timeline .tick { position: absolute; transform: translateX(-50%); font-size: 9px;
+                    letter-spacing: .1em; color: var(--ink-faint); font-family: var(--mono); }
+  #timeline .tick::before { content: ''; position: absolute; left: 50%; top: -7px; width: 1px; height: 3px;
+                            background: var(--rule); }
+  #timeline .caption { display: flex; justify-content: space-between; margin-bottom: 9px;
+                       font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--ink-faint); }
+
+  /* centre reticle */
+  #reticle { position: absolute; left: 50%; top: 50%; width: 1px; height: 1px;
+             transform: translate(-50%,-50%); }
+  #reticle::before, #reticle::after { content: ''; position: absolute; background: rgba(255,255,255,.25); }
+  #reticle::before { left: -9px; top: 0; width: 18px; height: 1px; }
+  #reticle::after { left: 0; top: -9px; width: 1px; height: 18px; }
+  #reticle.off { display: none; }
+
+  /* ------------------------------------------------------------- loader -- */
+  #loader { position: fixed; inset: 0; z-index: 50; background: #000;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            gap: 0; transition: opacity 1100ms ease, visibility 1100ms; }
+  #loader.done { opacity: 0; visibility: hidden; pointer-events: none; }
+  #loader .title { font-size: 12px; letter-spacing: .42em; text-transform: uppercase;
+                   color: var(--ink); font-weight: 300; margin-bottom: 30px; }
+  #loader .bar { width: min(340px, 62vw); height: 1px; background: rgba(255,255,255,.10); position: relative; }
+  #loader .bar i { position: absolute; left: 0; top: 0; height: 1px; width: 0%;
+                   background: var(--accent); transition: width 260ms ease; }
+  #loader .phase { margin-top: 16px; font-size: 10px; letter-spacing: .17em; text-transform: uppercase;
+                   color: var(--ink-dim); font-family: var(--sans); height: 12px; }
+  #loader .pct { margin-top: 26px; font-family: var(--mono); font-size: 10px; color: var(--ink-faint);
+                 font-variant-numeric: tabular-nums; }
+
+  /* -------------------------------------------------------------- panel -- */
+  #panel { position: absolute; right: 24px; top: 50%; transform: translateY(-50%) translateX(14px);
+           width: 268px; pointer-events: auto; opacity: 0; visibility: hidden;
+           transition: opacity 320ms ease, transform 320ms cubic-bezier(.2,.7,.3,1), visibility 320ms; }
+  #panel.open { opacity: 1; visibility: visible; transform: translateY(-50%) translateX(0); }
+  #panel h3 { margin: 0 0 4px; font-size: 9.5px; letter-spacing: .18em; text-transform: uppercase;
+              color: var(--ink-faint); font-weight: 500; }
+  #panel .group { margin-bottom: 20px; }
+  #panel .ctl { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px;
+                padding: 5px 0; border-bottom: 1px solid var(--rule); }
+  #panel .ctl span { font-size: 11px; color: var(--ink-dim); }
+  #panel .ctl b { font-family: var(--mono); font-size: 11px; font-weight: 400; color: var(--ink);
+                  font-variant-numeric: tabular-nums; }
+  #panel input[type=range] { grid-column: 1 / -1; width: 100%; height: 14px; -webkit-appearance: none;
+                             appearance: none; background: transparent; margin: 2px 0 0; }
+  #panel input[type=range]::-webkit-slider-runnable-track { height: 1px; background: var(--rule); }
+  #panel input[type=range]::-moz-range-track { height: 1px; background: var(--rule); }
+  #panel input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none;
+      width: 7px; height: 7px; margin-top: -3px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+  #panel input[type=range]::-moz-range-thumb { width: 7px; height: 7px; border: 0; border-radius: 50%;
+      background: var(--accent); cursor: pointer; }
+  #panel .btn { display: inline-block; font-size: 10px; letter-spacing: .13em; text-transform: uppercase;
+                color: var(--ink-dim); border: 1px solid var(--rule); padding: 6px 10px; margin: 6px 6px 0 0;
+                cursor: pointer; user-select: none; transition: color 160ms, border-color 160ms; }
+  #panel .btn:hover { color: var(--ink); border-color: rgba(255,255,255,.3); }
+  #panel select { width: 100%; background: #000; color: var(--ink); border: 1px solid var(--rule);
+                  font-family: var(--mono); font-size: 11px; padding: 5px 6px; margin-top: 4px; }
+
+  /* --------------------------------------------------------------- keys -- */
+  #keys { position: absolute; left: 24px; bottom: 88px; font-size: 10px; color: var(--ink-faint);
+          line-height: 1.85; font-family: var(--mono); opacity: 0; transition: opacity 400ms; }
+  #keys.on { opacity: 1; }
+  #keys kbd { color: var(--ink-dim); font-family: var(--mono); }
+
+  #hint { position: absolute; left: 50%; bottom: 108px; transform: translateX(-50%);
+          font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase; color: var(--ink-faint);
+          transition: opacity 600ms; }
+  #hint.gone { opacity: 0; }
+
+  #error { position: fixed; inset: 0; z-index: 100; background: #000; display: none;
+           align-items: center; justify-content: center; padding: 40px; }
+  #error div { max-width: 560px; font-family: var(--mono); font-size: 12px; line-height: 1.7;
+               color: #ff9a8a; white-space: pre-wrap; }
+  @media (max-width: 720px) {
+    #epoch .z { font-size: 30px; }
+    #telemetry { display: none; }
+    #keys { display: none; }
+    #panel { right: 12px; width: 232px; }
+    #timeline { left: 14px; right: 14px; }
+    #epoch { left: 14px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div class="hud" id="hud">
+  <div id="reticle" class="off"></div>
+
+  <div id="epoch">
+    <div class="z" id="redshiftValue">z 49.0</div>
+    <div class="sub" id="ageValue">0.050 Gyr after the Big Bang</div>
+    <div class="phase" id="phaseValue">dark ages</div>
+  </div>
+
+  <div id="telemetry">
+    <div class="row"><span class="k">scale factor</span><span class="v" id="tAcale">0.0200</span></div>
+    <div class="row"><span class="k">structure &sigma;</span><span class="v" id="tSigma">0.00</span></div>
+    <div class="row"><span class="k">particles</span><span class="v" id="tParticles">0</span></div>
+    <div class="row"><span class="k">splats</span><span class="v" id="tSplats">0</span></div>
+    <div class="row"><span class="k">speed</span><span class="v" id="tSpeed">0</span></div>
+    <div class="row"><span class="k">fps</span><span class="v" id="tFps">0</span></div>
+  </div>
+
+  <div id="keys">
+    <div><kbd>W A S D</kbd> fly &nbsp; <kbd>space/shift</kbd> up-down &nbsp; <kbd>Q E</kbd> roll</div>
+    <div><kbd>drag</kbd> look &nbsp; <kbd>scroll</kbd> speed &nbsp; <kbd>F</kbd> boost</div>
+    <div><kbd>P</kbd> pause time &nbsp; <kbd>[ ]</kbd> rate &nbsp; <kbd>R</kbd> new universe</div>
+    <div><kbd>1..4</kbd> vantage &nbsp; <kbd>TAB</kbd> controls &nbsp; <kbd>H</kbd> interface</div>
+  </div>
+
+  <div id="hint">click to enter the universe</div>
+
+  <div id="timeline">
+    <div class="caption"><span id="tlLeft">recombination</span><span id="tlRight">today</span></div>
+    <div class="track"><div class="fill" id="tlFill"></div><div class="head" id="tlHead"></div></div>
+    <div class="ticks" id="tlTicks"></div>
+  </div>
+
+  <div id="panel">
+    <div class="group">
+      <h3>Cosmology</h3>
+      <div class="ctl"><span>matter density &Omega;<sub>m</sub></span><b id="vOm">0.311</b>
+        <input type="range" id="sOm" min="0.05" max="1.0" step="0.005" value="0.311"></div>
+      <div class="ctl"><span>fluctuation amplitude &sigma;<sub>8</sub></span><b id="vS8">0.810</b>
+        <input type="range" id="sS8" min="0.3" max="1.4" step="0.01" value="0.81"></div>
+      <div class="ctl"><span>box size (Mpc/h)</span><b id="vBox">150</b>
+        <input type="range" id="sBox" min="50" max="500" step="10" value="150"></div>
+      <div><span class="btn" id="bRegen">rebuild universe</span></div>
+      <select id="preset">
+        <option value="planck18">Planck 2018 (our universe)</option>
+        <option value="wmap9">WMAP 9</option>
+        <option value="eds">Einstein-de Sitter</option>
+        <option value="openLowDensity">Open, low density</option>
+        <option value="lambdaHeavy">Lambda dominated</option>
+      </select>
+    </div>
+    <div class="group">
+      <h3>Rendering</h3>
+      <div class="ctl"><span>exposure</span><b id="vExp">1.40</b>
+        <input type="range" id="sExp" min="0.1" max="6" step="0.02" value="1.4"></div>
+      <div class="ctl"><span>bloom</span><b id="vBloom">0.72</b>
+        <input type="range" id="sBloom" min="0" max="2" step="0.01" value="0.72"></div>
+      <div class="ctl"><span>smoothing length</span><b id="vSize">1.15</b>
+        <input type="range" id="sSize" min="0.4" max="3.5" step="0.05" value="1.15"></div>
+      <div class="ctl"><span>brightness</span><b id="vBright">0.050</b>
+        <input type="range" id="sBright" min="0.005" max="0.4" step="0.005" value="0.05"></div>
+    </div>
+    <div class="group">
+      <h3>Time</h3>
+      <div class="ctl"><span>steps per second</span><b id="vRate">60</b>
+        <input type="range" id="sRate" min="0" max="240" step="1" value="60"></div>
+      <div><span class="btn" id="bPause">pause</span><span class="btn" id="bRestart">replay history</span></div>
+    </div>
+  </div>
+</div>
+
+<div id="loader">
+  <div class="title">Opus Universe</div>
+  <div class="bar"><i id="loadBar"></i></div>
+  <div class="phase" id="loadPhase">initialising</div>
+  <div class="pct" id="loadPct">0%</div>
+</div>
+
+<div id="error"><div id="errorText"></div></div>
+
+<script type="module">
+  import { main } from './src/app.js';
+  main().catch((e) => {
+    document.getElementById('loader').classList.add('done');
+    document.getElementById('error').style.display = 'flex';
+    document.getElementById('errorText').textContent = (e && e.stack) ? e.stack : String(e);
+    console.error(e);
+  });
+</script>
+</body>
+</html>

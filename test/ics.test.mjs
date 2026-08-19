@@ -22,7 +22,7 @@ const ic = new InitialConditions({
 
 console.log(`Initial conditions: N=${N}, L=${L} Mpc/h, z_init=49\n`);
 const t0 = Date.now();
-const out = ic.generate();
+const out = await ic.generate();
 const dt = Date.now() - t0;
 const s = out.stats;
 console.log(`  generated in ${dt} ms`);
@@ -157,7 +157,7 @@ console.log(`  mean displacement = ${s.meanDisplacementCells.toFixed(4)} cells  
   const ic1 = new InitialConditions({
     cosmology: cosmo, powerSpectrum: ps, gridSize: N, boxSize: L, seed: 20240819, aInit: 1 / 50, use2LPT: false,
   });
-  const zel = ic1.generate();
+  const zel = await ic1.generate();
   let diff = 0, mag = 0;
   const n3 = N ** 3;
   for (let i = 0; i < n3; i++) {
@@ -177,10 +177,10 @@ console.log(`  mean displacement = ${s.meanDisplacementCells.toFixed(4)} cells  
 
 /* ---- 6. determinism ---------------------------------------------------- */
 {
-  const again = new InitialConditions({
+  const again = await new InitialConditions({
     cosmology: cosmo, powerSpectrum: ps, gridSize: 32, boxSize: L, seed: 777, aInit: 1 / 50,
   }).generate();
-  const twice = new InitialConditions({
+  const twice = await new InitialConditions({
     cosmology: cosmo, powerSpectrum: ps, gridSize: 32, boxSize: L, seed: 777, aInit: 1 / 50,
   }).generate();
   let same = true;

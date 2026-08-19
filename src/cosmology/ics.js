@@ -38,20 +38,23 @@ export class InitialConditions {
     this.n3 = this.n ** 3;
   }
 
-  // Runs the whole pipeline. `onProgress(fraction, label)` drives the loader.
-  generate(onProgress = () => {}) {
+  // Runs the whole pipeline. `onProgress(fraction, label)` drives the loader and
+  // is awaited, so a caller can yield to the browser between phases and keep the
+  // loading screen animating through a computation that takes seconds.
+  async generate(onProgress = () => {}) {
     const n = this.n, n3 = this.n3;
     const fft = new FFT3D(n);
     const report = (f, label) => onProgress(Math.min(1, Math.max(0, f)), label);
+    const yieldTo = async (f, label) => { await report(f, label); };
 
     /* -- 1. white noise, then to Fourier space ------------------------- */
-    report(0.02, 'seeding quantum fluctuations');
+    await yieldTo(0.02, 'seeding quantum fluctuations');
     const re = new Float64Array(n3);
     const im = new Float64Array(n3);
     const rng = new RNG(this.seed);
     for (let i = 0; i < n3; i++) re[i] = rng.normal();
 
-    report(0.08, 'transforming to Fourier space');
+    await yieldTo(0.08, 'transforming to Fourier space');
     fft.transform(re, im, false);
 
     /* -- 2. impose the power spectrum ---------------------------------- */
@@ -59,7 +62,7 @@ export class InitialConditions {
     // sqrt(P(k)/dV) gives exactly the target spectrum, and because the field
     // started real the spectrum is automatically Hermitian, so the inverse
     // transforms below come back real without any symmetry bookkeeping.
-    report(0.22, 'applying the matter power spectrum');
+    await yieldTo(0.22, 'applying the matter power spectrum');
     const dV = Math.pow(this.L / n, 3);         // comoving cell volume, (Mpc/h)^3
     const kFund = TWO_PI / this.L;              // fundamental wavenumber, h/Mpc
     const kx = new Int32Array(n);
@@ -91,17 +94,17 @@ export class InitialConditions {
     const deltaIm = Float64Array.from(im);
 
     /* -- 3. first-order (Zel'dovich) displacement ---------------------- */
-    report(0.3, 'solving first-order displacement');
+    await yieldTo(0.3, 'solving first-order displacement');
     const psi1 = [new Float64Array(n3), new Float64Array(n3), new Float64Array(n3)];
     this._displacementFromSource(fft, deltaRe, deltaIm, psi1, (f) => report(0.3 + f * 0.25, 'solving first-order displacement'));
 
     /* -- 4. second-order source and displacement ----------------------- */
     let psi2 = null;
     if (this.use2LPT) {
-      report(0.56, 'evaluating second-order tensor');
+      await yieldTo(0.56, 'evaluating second-order tensor');
       psi2 = [new Float64Array(n3), new Float64Array(n3), new Float64Array(n3)];
       const source = this._secondOrderSource(fft, deltaRe, deltaIm, (f) => report(0.56 + f * 0.24, 'evaluating second-order tensor'));
-      report(0.8, 'solving second-order displacement');
+      await yieldTo(0.8, 'solving second-order displacement');
       // Transform the real-space source into Fourier space, then reuse the
       // same inverse-Laplacian-and-gradient machinery.
       const sRe = source, sIm = new Float64Array(n3);
@@ -111,7 +114,7 @@ export class InitialConditions {
     }
 
     /* -- 5. displace the particles ------------------------------------- */
-    report(0.95, 'placing particles on the light cone');
+    await yieldTo(0.95, 'placing particles on the light cone');
     const a = this.aInit;
     const D1 = this.cosmo.growth(a);
     const dD1 = this.cosmo.growthDeriv(a);
@@ -156,7 +159,7 @@ export class InitialConditions {
     }
 
     /* -- 6. the real-space linear density, for diagnostics and colouring - */
-    report(0.98, 'measuring the linear field');
+    await yieldTo(0.98, 'measuring the linear field');
     const dRe = Float64Array.from(deltaRe), dIm = Float64Array.from(deltaIm);
     fft.transform(dRe, dIm, true);
     const delta = new Float32Array(n3);
@@ -165,7 +168,7 @@ export class InitialConditions {
     const mean = s / n3;
     this.measuredSigmaGrid = Math.sqrt(s2 / n3 - mean * mean);
 
-    report(1, 'ready');
+    await yieldTo(1, 'ready');
 
     return {
       positions: pos,
